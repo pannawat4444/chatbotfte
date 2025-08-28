@@ -2,7 +2,11 @@ import os
 import google.generativeai as genai
 import pandas as pd
 import streamlit as st
-from prompt import PROMPT_FTE # สมมติว่าไฟล์ prompt.py อยู่ในตำแหน่งเดียวกัน
+import docx  # สำหรับอ่านไฟล์ .docx
+from PyPDF2 import PdfReader  # สำหรับอ่านไฟล์ .pdf
+# ไม่จำเป็นต้องใช้ BytesIO เมื่ออ่านไฟล์โดยตรงจาก disk
+# from io import BytesIO 
+from prompt import PROMPT_FTE 
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 # 🔐 ตั้งค่า API Key จาก st.secrets
@@ -40,14 +44,17 @@ model = genai.GenerativeModel(
 
 # 🔁 ฟังก์ชันล้างแชท
 def clear_history():
-    # *** เพิ่ม: เก็บประวัติปัจจุบันไว้ก่อนล้าง ***
     st.session_state["previous_messages"] = st.session_state["messages"].copy()
     st.session_state["messages"] = [
         {"role": "model", "content": "ประวัติการเเชทของท่าน"}
     ]
+    # รีเซ็ตสถานะการโหลดไฟล์เมื่อล้างประวัติ
+    st.session_state["excel_status"] = "ยังไม่ได้โหลด"
+    st.session_state["word_status"] = "ยังไม่ได้โหลด"
+    st.session_state["pdf_status"] = "ยังไม่ได้โหลด"
     st.rerun()
 
-# *** เพิ่ม: ฟังก์ชันเรียกคืนประวัติแชท ***
+# ฟังก์ชันเรียกคืนประวัติแชท
 def restore_history():
     if "previous_messages" in st.session_state and st.session_state["previous_messages"]:
         st.session_state["messages"] = st.session_state["previous_messages"].copy()
@@ -55,13 +62,45 @@ def restore_history():
         st.warning("ไม่พบประวัติที่สามารถเรียกคืนได้")
     st.rerun()
 
-# 🔧 Sidebar: ปุ่ม Clear และ Restore
+# *** ฟังก์ชันใหม่: อ่านข้อความจากไฟล์ .docx (รับ path แทน file object) ***
+def extract_text_from_docx(docx_path):
+    try:
+        doc = docx.Document(docx_path)
+        full_text = []
+        for para in doc.paragraphs:
+            full_text.append(para.text)
+        return "\n".join(full_text)
+    except Exception as e:
+        st.error(f"Error reading Word file '{docx_path}': {e}")
+        return ""
+
+# *** ฟังก์ชันใหม่: อ่านข้อความจากไฟล์ .pdf (รับ path แทน file object) ***
+def extract_text_from_pdf(pdf_path):
+    try:
+        reader = PdfReader(pdf_path)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() or ""
+        return text
+    except Exception as e:
+        st.error(f"Error reading PDF file '{pdf_path}': {e}")
+        return ""
+
+# 🔧 Sidebar: ปุ่ม Clear และ Restore เท่านั้น (ไม่มี File Uploader แล้ว)
 with st.sidebar:
+    st.header("การจัดการแชท")
     if st.button("🧹 Clear History"):
         clear_history()
-    # *** เพิ่ม: ปุ่มเรียกคืนประวัติแชท ***
     if st.button("🔄 Restore Last History"):
         restore_history()
+
+    st.markdown("---")
+    st.header("สถานะการโหลดไฟล์ข้อมูล")
+    # *** แสดงสถานะการโหลดไฟล์ใน Sidebar ***
+    st.info(f"Excel ({st.session_state.get('excel_file_name', 'N/A')}): {st.session_state.get('excel_status', 'ยังไม่ได้โหลด')}")
+    st.info(f"Word ({st.session_state.get('word_file_name', 'N/A')}): {st.session_state.get('word_status', 'ยังไม่ได้โหลด')}")
+    st.info(f"PDF ({st.session_state.get('pdf_file_name', 'N/A')}): {st.session_state.get('pdf_status', 'ยังไม่ได้โหลด')}")
+
 
 # 🧾 ชื่อแอปบนหน้า
 st.title("💬 Welcome to Faculty of Technical Education, KMUTNB")
@@ -74,19 +113,70 @@ if "messages" not in st.session_state:
             "content": "ท่านสนใจสอบถามข้อมูลเกี่ยวกับคณะครุศาสตร์อุตสาหกรรม มจพ. ด้านใดคะ",
         }
     ]
-# *** เพิ่ม: เริ่มต้น previous_messages ถ้ายังไม่มี ***
 if "previous_messages" not in st.session_state:
     st.session_state["previous_messages"] = []
 
-# 📂 โหลดไฟล์ Excel
-# ไฟล์ FTE-DATASET.xlsx ต้องอยู่ในโฟลเดอร์เดียวกันกับ app.py ใน GitHub repository
-file_path = "FTE-DATASET.xlsx" 
-try:
-    df = pd.read_excel(file_path)
-    file_content = df.to_string(index=False)
-except Exception as e:
-    st.error(f"Error reading file: {e}. โปรดตรวจสอบว่าไฟล์ Excel 'FTE-DATASET.xlsx' อยู่ใน GitHub repository ของคุณในโฟลเดอร์เดียวกับ app.py หรือไม่.")
-    st.stop()
+# *** เพิ่ม: เริ่มต้นสถานะการโหลดไฟล์ใน session_state ถ้ายังไม่มี ***
+if "excel_status" not in st.session_state:
+    st.session_state["excel_status"] = "กำลังตรวจสอบ..."
+if "word_status" not in st.session_state:
+    st.session_state["word_status"] = "กำลังตรวจสอบ..."
+if "pdf_status" not in st.session_state:
+    st.session_state["pdf_status"] = "กำลังตรวจสอบ..."
+if "excel_file_name" not in st.session_state:
+    st.session_state["excel_file_name"] = "FTE-DATASET.xlsx"
+if "word_file_name" not in st.session_state:
+    st.session_state["word_file_name"] = "Data Set chatbotfte.docx"
+if "pdf_file_name" not in st.session_state:
+    st.session_state["pdf_file_name"] = "Data Set chatbotfte.pdf"
+
+# 📂 โหลดและประมวลผลไฟล์ข้อมูลจากโฟลเดอร์เดียวกัน
+all_file_content = ""
+
+# กำหนดชื่อไฟล์ Excel, Word, PDF ที่คาดว่าจะอยู่ในโฟลเดอร์เดียวกันกับ app.py
+excel_file_name = st.session_state["excel_file_name"]
+word_file_name = st.session_state["word_file_name"] 
+pdf_file_name = st.session_state["pdf_file_name"]   
+
+# โหลดไฟล์ Excel
+if os.path.exists(excel_file_name):
+    try:
+        df = pd.read_excel(excel_file_name)
+        all_file_content += "\nข้อมูลจากไฟล์ Excel:\n" + df.to_string(index=False)
+        st.session_state["excel_status"] = f"โหลดสำเร็จ ({len(df)} แถว)"
+        # st.success(f"โหลดไฟล์ Excel '{excel_file_name}' สำเร็จ.") # ลบข้อความนี้ออกเพื่อย้ายสถานะไป Sidebar
+    except Exception as e:
+        st.session_state["excel_status"] = f"ข้อผิดพลาด: {e}"
+        st.error(f"Error reading Excel file '{excel_file_name}': {e}")
+else:
+    st.session_state["excel_status"] = "ไม่พบไฟล์"
+    st.warning(f"ไม่พบไฟล์ Excel '{excel_file_name}' ใน GitHub repository โปรดตรวจสอบ.")
+
+# โหลดไฟล์ Word
+if os.path.exists(word_file_name):
+    word_text = extract_text_from_docx(word_file_name)
+    if word_text:
+        all_file_content += "\nข้อมูลจากไฟล์ Word:\n" + word_text
+        st.session_state["word_status"] = f"โหลดสำเร็จ ({len(word_text.splitlines())} บรรทัด)"
+        # st.success(f"โหลดและอ่านไฟล์ Word '{word_file_name}' สำเร็จ.") # ลบข้อความนี้ออก
+    else:
+        st.session_state["word_status"] = "ไฟล์ว่างเปล่า/อ่านไม่ได้"
+else:
+    st.session_state["word_status"] = "ไม่พบไฟล์"
+    st.warning(f"ไม่พบไฟล์ Word '{word_file_name}' ใน GitHub repository โปรดตรวจสอบชื่อและตำแหน่ง.")
+
+# โหลดไฟล์ PDF
+if os.path.exists(pdf_file_name):
+    pdf_text = extract_text_from_pdf(pdf_file_name)
+    if pdf_text:
+        all_file_content += "\nข้อมูลจากไฟล์ PDF:\n" + pdf_text
+        st.session_state["pdf_status"] = f"โหลดสำเร็จ ({len(pdf_text.splitlines())} บรรทัด)"
+        # st.success(f"โหลดและอ่านไฟล์ PDF '{pdf_file_name}' สำเร็จ.") # ลบข้อความนี้ออก
+    else:
+        st.session_state["pdf_status"] = "ไฟล์ว่างเปล่า/อ่านไม่ได้"
+else:
+    st.session_state["pdf_status"] = "ไม่พบไฟล์"
+    st.warning(f"ไม่พบไฟล์ PDF '{pdf_file_name}' ใน GitHub repository โปรดตรวจสอบชื่อและตำแหน่ง.")
 
 # 💬 แสดงข้อความสนทนาเดิม
 for msg in st.session_state["messages"]:
@@ -112,8 +202,9 @@ if prompt := st.chat_input():
                 {"role": msg["role"], "parts": [{"text": msg["content"]}]}
                 for msg in st.session_state["messages"]
             ]
-            # แทรกเนื้อหาไฟล์ Excel เป็นบริบทเพิ่มเติมให้กับโมเดล
-            history.insert(0, {"role": "user", "parts": [{"text": "ข้อมูลอ้างอิงจากไฟล์ Excel:\n" + file_content}]})
+            # แทรกเนื้อหาไฟล์ทั้งหมด (Excel, Word, PDF) เป็นบริบทเพิ่มเติมให้กับโมเดล
+            if all_file_content:
+                history.insert(0, {"role": "user", "parts": [{"text": "ข้อมูลอ้างอิง:\n" + all_file_content}]})
             
             chat_session = model.start_chat(history=history)
             response = chat_session.send_message(prompt)
