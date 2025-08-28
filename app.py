@@ -40,15 +40,28 @@ model = genai.GenerativeModel(
 
 # 🔁 ฟังก์ชันล้างแชท
 def clear_history():
+    # *** เพิ่ม: เก็บประวัติปัจจุบันไว้ก่อนล้าง ***
+    st.session_state["previous_messages"] = st.session_state["messages"].copy()
     st.session_state["messages"] = [
         {"role": "model", "content": "ประวัติการเเชทของท่าน"}
     ]
     st.rerun()
 
-# 🔧 Sidebar: ปุ่ม Clear เท่านั้น
+# *** เพิ่ม: ฟังก์ชันเรียกคืนประวัติแชท ***
+def restore_history():
+    if "previous_messages" in st.session_state and st.session_state["previous_messages"]:
+        st.session_state["messages"] = st.session_state["previous_messages"].copy()
+    else:
+        st.warning("ไม่พบประวัติที่สามารถเรียกคืนได้")
+    st.rerun()
+
+# 🔧 Sidebar: ปุ่ม Clear และ Restore
 with st.sidebar:
     if st.button("🧹 Clear History"):
         clear_history()
+    # *** เพิ่ม: ปุ่มเรียกคืนประวัติแชท ***
+    if st.button("🔄 Restore Last History"):
+        restore_history()
 
 # 🧾 ชื่อแอปบนหน้า
 st.title("💬 Welcome to Faculty of Technical Education, KMUTNB")
@@ -61,9 +74,11 @@ if "messages" not in st.session_state:
             "content": "ท่านสนใจสอบถามข้อมูลเกี่ยวกับคณะครุศาสตร์อุตสาหกรรม มจพ. ด้านใดคะ",
         }
     ]
+# *** เพิ่ม: เริ่มต้น previous_messages ถ้ายังไม่มี ***
+if "previous_messages" not in st.session_state:
+    st.session_state["previous_messages"] = []
 
 # 📂 โหลดไฟล์ Excel
-# *** แก้ไข: ใช้ Relative Path (เส้นทางแบบเทียบเคียง) แทน Absolute Path ***
 # ไฟล์ FTE-DATASET.xlsx ต้องอยู่ในโฟลเดอร์เดียวกันกับ app.py ใน GitHub repository
 file_path = "FTE-DATASET.xlsx" 
 try:
