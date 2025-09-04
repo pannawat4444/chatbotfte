@@ -379,9 +379,5 @@ if prompt:
     # 3) ส่งถามโมเดล (มี retry + fallback)
     with st.chat_message("assistant", avatar=assistant_avatar):
         reply = stream_typing_with_retry(history_payload, prompt_text=prompt, typing_delay=0.004)
-
-    # 4) ปิดท้ายสุภาพเสมอ
-    followups = [
-        "\n\nมีอะไรเพิ่มเติมที่ต้องการให้ฉันช่วยอีกไหมคะ"
-    ]
+        
     st.session_state["messages"].append({"role": "assistant", "content": (reply or "") + random.choice(followups)})
