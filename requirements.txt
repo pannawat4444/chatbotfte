@@ -1,8 +1,8 @@
 streamlit
 pandas
 google-generativeai
-python-docx 
-pypdf2
+python-docx
+PyPDF2
 python-dotenv==1.0.1
 scikit-learn==1.5.0
 scipy==1.13.1
