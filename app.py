@@ -3,7 +3,7 @@ import os
 import time
 import random
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, List, Dict, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -15,17 +15,19 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 from prompt import PROMPT_FTE  # ต้องมีไฟล์ prompt.py ที่ประกาศ PROMPT_FTE
 
+# ====== NEW: retrieval deps (TF-IDF) ======
+from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
+
 # =========================
 # PATHS & DISCOVERY
 # =========================
 BASE_DIR = Path(__file__).resolve().parent
 
-# ส่วนขยายไฟล์ที่รองรับ
-DOC_EXTS = {".docx"}
+DOC_EXTS     = {".docx"}
 TABULAR_EXTS = {".csv", ".xlsx", ".xls"}
-PDF_EXTS = {".pdf"}
+PDF_EXTS     = {".pdf"}
 
-# ไอคอนบอท (ถ้ามี)
 AVATAR_PATH = BASE_DIR / "assets" / "green-bot.png"
 PAGE_ICON = str(AVATAR_PATH) if AVATAR_PATH.exists() else None
 
@@ -59,7 +61,7 @@ SAFETY_SETTINGS = {
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
 }
 PRIMARY_MODEL_NAME = "gemini-2.0-flash"
-FALLBACK_MODEL_NAME = "gemini-1.5-flash"  # สำรองเมื่อโดน 429/เกินโควตา
+FALLBACK_MODEL_NAME = "gemini-1.5-flash"
 
 def make_model(name: str) -> genai.GenerativeModel:
     return genai.GenerativeModel(
@@ -109,7 +111,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         return ""
 
 @st.cache_data(show_spinner=False)
-def load_excel_as_text(excel_path: str, max_rows: int = 120, max_cols: int = 12) -> str:
+def load_excel_as_text(excel_path: str, max_rows: int = 160, max_cols: int = 12) -> str:
     try:
         if not os.path.exists(excel_path):
             return ""
@@ -156,80 +158,100 @@ def discover_all_files(base_dir: str) -> dict:
 FOUND = discover_all_files(str(BASE_DIR))
 
 # =========================
-# BUILD REFERENCE CORPUS + SIDEBAR STATUS
+# NEW: COLLECT & CHUNK TEXTS FOR RETRIEVAL
 # =========================
+def chunk_text(text: str, size: int = 900, overlap: int = 150) -> List[str]:
+    text = (text or "").strip()
+    if not text:
+        return []
+    chunks, i, n = [], 0, len(text)
+    while i < n:
+        j = min(i + size, n)
+        chunks.append(text[i:j])
+        i = j - overlap if j - overlap > i else j
+    return [c for c in chunks if c.strip()]
+
 @st.cache_data(show_spinner=False)
-def build_reference_corpus_from_all_files(
-    docx_files: list[Path],
-    tabular_files: list[Path],
-    pdf_files: list[Path],
-    total_max_chars: int = 90_000,
-    per_docx_max_chars: int = 16_000,
-    per_pdf_max_chars: int = 8_000,
-    per_tabular_rows: int = 160,
-    per_tabular_cols: int = 12,
-) -> tuple[str, dict]:
-    """อ่านทุกไฟล์ตามชนิด รวมเป็นคอร์ปัส (จำกัดขนาด) + รายงานสถานะ"""
-    parts = []
-    status = {"docx": [], "pdf": [], "tabular": []}
-    total_chars = 0
+def collect_chunks(docx_files: List[Path], tabular_files: List[Path], pdf_files: List[Path]) -> List[Dict]:
+    rows = []
 
     # DOCX
     for p in docx_files:
         try:
-            txt = extract_text_from_docx(str(p))[:per_docx_max_chars]
-            if txt.strip():
-                frag = f"[DOCX] {p.name}\n" + txt
-                if total_chars + len(frag) <= total_max_chars:
-                    parts.append(frag)
-                    total_chars += len(frag)
-                status["docx"].append((p.name, "โหลดสำเร็จ"))
-            else:
-                status["docx"].append((p.name, "ไฟล์ว่างหรืออ่านไม่ได้"))
-        except Exception as e:
-            status["docx"].append((p.name, f"ผิดพลาด: {e}"))
+            txt = extract_text_from_docx(str(p))
+            for c in chunk_text(txt):
+                rows.append({"source": p.name, "kind": "DOCX", "text": c})
+        except Exception:
+            pass
 
-    # TABULAR (CSV/XLSX/XLS)
+    # TABULAR
     for p in tabular_files:
         try:
             if p.suffix.lower() == ".csv":
-                txt = load_csv_as_text(str(p), max_rows=per_tabular_rows, max_cols=per_tabular_cols)
+                txt = load_csv_as_text(str(p))
             else:
-                txt = load_excel_as_text(str(p), max_rows=per_tabular_rows, max_cols=per_tabular_cols)
-            if txt.strip():
-                frag = f"[TABLE] {p.name}\n" + txt
-                if total_chars + len(frag) <= total_max_chars:
-                    parts.append(frag)
-                    total_chars += len(frag)
-                status["tabular"].append((p.name, "โหลดสำเร็จ"))
-            else:
-                status["tabular"].append((p.name, "ไฟล์ว่างหรืออ่านไม่ได้"))
-        except Exception as e:
-            status["tabular"].append((p.name, f"ผิดพลาด: {e}"))
+                txt = load_excel_as_text(str(p))
+            for c in chunk_text(txt):
+                rows.append({"source": p.name, "kind": "TABLE", "text": c})
+        except Exception:
+            pass
 
     # PDF
     for p in pdf_files:
         try:
-            txt = extract_text_from_pdf(str(p))[:per_pdf_max_chars]
-            if txt.strip():
-                frag = f"[PDF] {p.name}\n" + txt
-                if total_chars + len(frag) <= total_max_chars:
-                    parts.append(frag)
-                    total_chars += len(frag)
-                status["pdf"].append((p.name, "โหลดสำเร็จ"))
-            else:
-                status["pdf"].append((p.name, "ไฟล์ว่างหรืออ่านไม่ได้"))
-        except Exception as e:
-            status["pdf"].append((p.name, f"ผิดพลาด: {e}"))
+            txt = extract_text_from_pdf(str(p))
+            for c in chunk_text(txt):
+                rows.append({"source": p.name, "kind": "PDF", "text": c})
+        except Exception:
+            pass
 
-    corpus = "\n\n".join(parts)
-    if len(corpus) > total_max_chars:
-        corpus = corpus[:total_max_chars] + "\n\n[TRUNCATED]"
-    return corpus, status
+    return rows
 
-REFERENCE_BLOB, LOAD_STATUS = build_reference_corpus_from_all_files(
-    FOUND["docx"], FOUND["tabular"], FOUND["pdf"]
-)
+CHUNKS = collect_chunks(FOUND["docx"], FOUND["tabular"], FOUND["pdf"])
+
+# =========================
+# NEW: BUILD TF-IDF INDEX (CHAR N-GRAM → ดีสำหรับภาษาไทย)
+# =========================
+@st.cache_resource(show_spinner=False)
+def build_index(chunks: List[Dict]):
+    texts = [r["text"] for r in chunks] or ["dummy"]
+    vect = TfidfVectorizer(analyzer="char", ngram_range=(3, 5))
+    X = vect.fit_transform(texts)
+    return vect, X
+
+VECT, X = build_index(CHUNKS)
+
+def retrieve_context(query: str, top_k: int = 8, max_chars: int = 6000) -> Tuple[str, List[Tuple[int, float]]]:
+    if not query.strip() or X.shape[0] == 0:
+        return "", []
+    qv = VECT.transform([query])
+    sims = (X @ qv.T).toarray().ravel()  # cosine sim for tfidf-normalized
+    idx = np.argsort(-sims)[:top_k]
+    picked = [(int(i), float(sims[i])) for i in idx if sims[i] > 0]
+    parts, total = [], 0
+    for i, _ in picked:
+        seg = CHUNKS[i]
+        block = f"[{seg['kind']}] {seg['source']}\n{seg['text']}\n"
+        if total + len(block) > max_chars:
+            break
+        parts.append(block); total += len(block)
+    return "\n".join(parts), picked
+
+# =========================
+# BUILD REFERENCE STATUS (สำหรับ Sidebar เท่านั้น)
+# =========================
+# นับสถานะโหลดแบบคร่าว ๆ จากผล collect_chunks
+LOAD_STATUS = {
+    "docx": {},
+    "tabular": {},
+    "pdf": {},
+}
+for p in FOUND["docx"]:
+    LOAD_STATUS["docx"][p.name] = "โหลดสำเร็จ" if any(r["source"] == p.name for r in CHUNKS) else "ไฟล์ว่างหรืออ่านไม่ได้"
+for p in FOUND["tabular"]:
+    LOAD_STATUS["tabular"][p.name] = "โหลดสำเร็จ" if any(r["source"] == p.name for r in CHUNKS) else "ไฟล์ว่างหรืออ่านไม่ได้"
+for p in FOUND["pdf"]:
+    LOAD_STATUS["pdf"][p.name] = "โหลดสำเร็จ" if any(r["source"] == p.name for r in CHUNKS) else "ไฟล์ว่างหรืออ่านไม่ได้"
 
 # =========================
 # SESSION STATE (MESSAGES)
@@ -242,7 +264,7 @@ if "previous_messages" not in st.session_state:
     st.session_state["previous_messages"] = []
 
 # =========================
-# SIDEBAR (CLEAR/RESTORE + สถานะไฟล์)
+# SIDEBAR
 # =========================
 with st.sidebar:
     st.header("การจัดการแชท")
@@ -259,20 +281,19 @@ with st.sidebar:
     st.write(f"- PDF: {len(FOUND['pdf'])} ไฟล์")
 
     with st.expander("สถานะการโหลด DOCX"):
-        for name, s in LOAD_STATUS["docx"]:
+        for name, s in LOAD_STATUS["docx"].items():
             st.info(f"{name} : {s}")
     with st.expander("สถานะการโหลดตาราง (CSV/XLSX/XLS)"):
-        for name, s in LOAD_STATUS["tabular"]:
+        for name, s in LOAD_STATUS["tabular"].items():
             st.info(f"{name} : {s}")
     with st.expander("สถานะการโหลด PDF"):
-        for name, s in LOAD_STATUS["pdf"]:
+        for name, s in LOAD_STATUS["pdf"].items():
             st.info(f"{name} : {s}")
 
 # =========================
 # RENDER HISTORY
 # =========================
 assistant_avatar = str(AVATAR_PATH) if AVATAR_PATH.exists() else None
-
 for msg in st.session_state["messages"]:
     if msg["role"] == "assistant":
         st.chat_message("assistant", avatar=assistant_avatar).write(msg["content"])
@@ -280,33 +301,28 @@ for msg in st.session_state["messages"]:
         st.chat_message(msg["role"]).write(msg["content"])
 
 # =========================
-# BUILD HISTORY FOR GEMINI
+# BUILD HISTORY FOR GEMINI (ใช้บริบทที่ดึงมา เฉพาะที่เกี่ยว)
 # =========================
-def build_history_for_gemini(messages):
+def build_history_for_gemini(messages, context_text: str):
     history = []
-    if REFERENCE_BLOB:
-        # ไม่แสดงเนื้อหาไฟล์ให้ผู้ใช้เห็นโดยตรง แต่ส่งเป็นบริบทให้โมเดล
-        history.append({"role": "user", "parts": [{"text": "ข้อมูลอ้างอิง:\n" + REFERENCE_BLOB}]})
+    if context_text:
+        history.append({"role": "user", "parts": [{"text": "บริบทอ้างอิง (ซ่อนจากผู้ใช้):\n" + context_text}]})
     for m in messages:
         role = "user" if m["role"] == "user" else "model"
         history.append({"role": role, "parts": [{"text": m["content"]}]})
     return history
 
 # =========================
-# STREAMING + RETRY + FALLBACK (HANDLE 429)
+# STREAMING + RETRY + FALLBACK
 # =========================
 def _should_retry(e: Exception) -> bool:
     msg = str(e).lower()
-    keys = ["429", "quota", "rate", "exceed", "resource exhausted", "deadline exceeded"]
-    return any(k in msg for k in keys)
+    return any(k in msg for k in ["429", "quota", "rate", "exceed", "resource exhausted", "deadline exceeded"])
 
 def stream_typing_with_retry(history_payload, prompt_text: str,
                              typing_delay: float = 0.004,
                              retries: int = 2,
                              backoff: float = 2.0) -> str:
-    """
-    สตรีมคำตอบจากโมเดลหลักด้วย retry/backoff; ถ้ายังไม่ผ่าน สลับไปใช้โมเดลสำรองอัตโนมัติ
-    """
     status = st.empty()
     placeholder = st.empty()
     status.write("กำลังค้นหาคำตอบ...")
@@ -326,7 +342,6 @@ def stream_typing_with_retry(history_payload, prompt_text: str,
                 time.sleep(typing_delay)
         return full_text
 
-    # ---- Try primary with retries
     last_err = None
     for attempt in range(retries):
         try:
@@ -334,21 +349,16 @@ def stream_typing_with_retry(history_payload, prompt_text: str,
         except Exception as e:
             last_err = e
             if _should_retry(e) and attempt < retries - 1:
-                time.sleep(backoff)
-                backoff *= 2
+                time.sleep(backoff); backoff *= 2
             else:
                 break
 
-    # ---- Fallback
     try:
         placeholder.markdown("**สลับไปใช้โมเดลสำรองชั่วคราวเพื่อให้ได้คำตอบค่ะ...**")
         return _stream_from_model(FALLBACK_MODEL_NAME)
-    except Exception as e2:
+    except Exception:
         status.empty()
-        placeholder.markdown(
-            "ขออภัยค่ะ ระบบไม่สามารถสร้างคำตอบได้ในขณะนี้ (อาจเกิดจากโควตาหรือการเชื่อมต่อ)\n"
-            "กรุณาลองใหม่ภายหลัง หรือปรับลดความยาวคำถาม/ความถี่การใช้งานค่ะ"
-        )
+        placeholder.markdown("ขออภัยค่ะ ระบบไม่สามารถสร้างคำตอบได้ในขณะนี้ กรุณาลองใหม่ภายหลังค่ะ")
         return ""
 
 # =========================
@@ -356,29 +366,21 @@ def stream_typing_with_retry(history_payload, prompt_text: str,
 # =========================
 prompt = st.chat_input("พิมพ์คำถามของคุณที่นี่...")
 if prompt:
-    # ผู้ใช้
+    # เก็บข้อความผู้ใช้
     st.session_state["messages"].append({"role": "user", "content": prompt})
     st.chat_message("user").write(prompt)
 
-    # ประวัติ + เริ่มแชท
-    history_payload = build_history_for_gemini(st.session_state["messages"][:-1])
+    # 1) ดึงบริบทที่เกี่ยวข้องจากดัชนี
+    context_text, hits = retrieve_context(prompt, top_k=8, max_chars=6000)
 
-    # ผู้ช่วย
+    # 2) สร้าง history ที่รวม 'บริบทอ้างอิง' (จะไม่ถูกแสดงใน UI)
+    history_payload = build_history_for_gemini(st.session_state["messages"][:-1], context_text)
+
+    # 3) ส่งถามโมเดล (มี retry + fallback)
     with st.chat_message("assistant", avatar=assistant_avatar):
-        normalized = prompt.strip().lower()
+        reply = stream_typing_with_retry(history_payload, prompt_text=prompt, typing_delay=0.004)
 
-        if normalized == "history":
-            history_text = "\n".join(
-                [f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state["messages"]]
-            )
-            # ใช้ fallback-aware เช่นกัน (สรุปประวัติ)
-            reply = stream_typing_with_retry(history_payload=[],
-                                             prompt_text=f"สรุปประวัติการสนทนานี้ให้อ่านง่าย กระชับ และเป็นกันเอง:\n\n{history_text}",
-                                             typing_delay=0.003)
-        else:
-            reply = stream_typing_with_retry(history_payload, prompt_text=prompt, typing_delay=0.004)
-
-    # ปิดท้ายทุกคำตอบด้วยประโยคสุภาพแบบสุ่ม (ไม่มีอีโมจิ)
+    # 4) ปิดท้ายสุภาพเสมอ
     followups = [
         "\n\nมีอะไรเพิ่มเติมที่ต้องการให้ฉันช่วยอีกไหมคะ",
         "\n\nต้องการข้อมูลส่วนไหนเพิ่มเติมอีกไหมคะ",
@@ -386,7 +388,4 @@ if prompt:
         "\n\nมีหัวข้ออื่นของคณะครุศาสตร์อุตสาหกรรมที่อยากทราบอีกไหมคะ",
         "\n\nหากต้องการข้อมูลเชิงลึก ระบุรหัสวิชา/ชื่อหลักสูตรเพิ่มเติมได้เลยนะคะ",
     ]
-    reply_with_followup = (reply or "") + random.choice(followups)
-
-    # เก็บลงประวัติ
-    st.session_state["messages"].append({"role": "assistant", "content": reply_with_followup})
+    st.session_state["messages"].append({"role": "assistant", "content": (reply or "") + random.choice(followups)})
