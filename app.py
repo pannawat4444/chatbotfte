@@ -382,7 +382,7 @@ if prompt:
 
      # ปิดท้ายทุกคำตอบด้วยประโยคสุภาพแบบสุ่ม (ไม่มีอีโมจิ)
     followups = [
-
+        "\n\nต้องการข้อมูลส่วนไหนเพิ่มเติมอีกไหมคะ"
     ]
     reply_with_followup = (reply or "") + random.choice(followups)
         
