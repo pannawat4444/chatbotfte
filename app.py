@@ -2,11 +2,13 @@
 import os
 import time
 import random
+from pathlib import Path
+from typing import Iterable
+
 import pandas as pd
 import streamlit as st
 import docx
 from PyPDF2 import PdfReader
-from pathlib import Path
 
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
@@ -14,41 +16,27 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from prompt import PROMPT_FTE  # ต้องมีไฟล์ prompt.py ที่ประกาศ PROMPT_FTE
 
 # =========================
-# PATHS (GitHub/Streamlit Cloud friendly)
+# PATHS & DISCOVERY
 # =========================
 BASE_DIR = Path(__file__).resolve().parent
 
-# ไฟล์อยู่ที่รากรีโป (ตามภาพ GitHub ที่ให้มา)
-EXCEL_CANDIDATES = [
-    BASE_DIR / "FTE-DATASET.xlsx",
-    BASE_DIR / "workaw_data.xlsx",   # เผื่อใช้ไฟล์นี้ด้วย
-]
-DOCX_CANDIDATES  = [BASE_DIR / "Data Set No Question docx.docx"]
-PDF_CANDIDATES   = [BASE_DIR / "Data Set No Question pdf.pdf"]
+# ส่วนขยายไฟล์ที่รองรับ
+DOC_EXTS = {".docx"}
+TABULAR_EXTS = {".csv", ".xlsx", ".xls"}
+PDF_EXTS = {".pdf"}
 
-AVATAR_CANDIDATES = [BASE_DIR / "assets" / "green-bot.png"]  # ถ้าไม่มีจะไม่ใช้
-
-def pick_first_existing(paths):
-    for p in paths:
-        if p.exists():
-            return p
-    return None
-
-EXCEL_PATH  = pick_first_existing(EXCEL_CANDIDATES)
-DOCX_PATH   = pick_first_existing(DOCX_CANDIDATES)
-PDF_PATH    = pick_first_existing(PDF_CANDIDATES)
-AVATAR_PATH = pick_first_existing(AVATAR_CANDIDATES)
-
-PAGE_ICON = str(AVATAR_PATH) if AVATAR_PATH else None
+# ไอคอนบอท (ถ้ามี)
+AVATAR_PATH = BASE_DIR / "assets" / "green-bot.png"
+PAGE_ICON = str(AVATAR_PATH) if AVATAR_PATH.exists() else None
 
 # =========================
-# Page config & Header
+# PAGE CONFIG & HEADER
 # =========================
 st.set_page_config(page_title="FTE Chatbot • KMUTNB", page_icon=PAGE_ICON, layout="centered")
-st.title("💬 Welcome to Faculty of Technical Education, KMUTNB")
+st.title("FTE Chatbot • KMUTNB")
 
 # =========================
-# API Key & Model config
+# API KEY & MODEL CONFIG
 # =========================
 api_key = st.secrets.get("GEMINI_APIKEY")
 if not api_key:
@@ -80,7 +68,7 @@ model = genai.GenerativeModel(
 )
 
 # =========================
-# Chat history utils
+# CHAT HISTORY UTILS
 # =========================
 def clear_history():
     st.session_state["previous_messages"] = st.session_state.get("messages", []).copy()
@@ -95,13 +83,13 @@ def restore_history():
     st.rerun()
 
 # =========================
-# File readers (path-based) + cache
+# FILE READERS (CACHED)
 # =========================
 @st.cache_data(show_spinner=False)
 def extract_text_from_docx(docx_path: str) -> str:
     try:
         d = docx.Document(docx_path)
-        return "\n".join([p.text for p in d.paragraphs])
+        return "\n".join([p.text for p in d.paragraphs if p.text.strip()])
     except Exception as e:
         st.error(f"Error reading Word file '{docx_path}': {e}")
         return ""
@@ -119,14 +107,13 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         return ""
 
 @st.cache_data(show_spinner=False)
-def load_excel_as_text(excel_path: str, max_rows: int = 80) -> str:
+def load_excel_as_text(excel_path: str, max_rows: int = 120, max_cols: int = 12) -> str:
     try:
         if not os.path.exists(excel_path):
             return ""
         df = pd.read_excel(excel_path)
-        # ลด payload
-        if df.shape[1] > 8:
-            df = df.iloc[:, :8]
+        if df.shape[1] > max_cols:
+            df = df.iloc[:, :max_cols]
         if len(df) > max_rows:
             df = df.head(max_rows)
         return df.to_csv(index=False)
@@ -134,77 +121,123 @@ def load_excel_as_text(excel_path: str, max_rows: int = 80) -> str:
         st.error(f"Error reading Excel file '{excel_path}': {e}")
         return ""
 
+@st.cache_data(show_spinner=False)
+def load_csv_as_text(csv_path: str, max_rows: int = 200, max_cols: int = 12) -> str:
+    try:
+        if not os.path.exists(csv_path):
+            return ""
+        df = pd.read_csv(csv_path, engine="python", encoding_errors="ignore")
+        if df.shape[1] > max_cols:
+            df = df.iloc[:, :max_cols]
+        if len(df) > max_rows:
+            df = df.head(max_rows)
+        return df.to_csv(index=False)
+    except Exception as e:
+        st.error(f"Error reading CSV file '{csv_path}': {e}")
+        return ""
+
 # =========================
-# Build reference corpus + Sidebar status
+# DISCOVER FILES (RECURSIVE)
 # =========================
-def build_reference_corpus_with_sidebar_status(
-    excel_file: Path | None = EXCEL_PATH,
-    word_file: Path | None = DOCX_PATH,
-    pdf_file:  Path | None = PDF_PATH,
-    max_chars: int = 45_000,
-) -> str:
-    def _name(p: Path | None) -> str:
-        return p.name if isinstance(p, Path) else "N/A"
+def rglob_many(root: Path, exts: Iterable[str]) -> list[Path]:
+    exts_low = {e.lower() for e in exts}
+    return [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in exts_low]
 
-    st.session_state["excel_file_name"] = _name(excel_file)
-    st.session_state["word_file_name"]  = _name(word_file)
-    st.session_state["pdf_file_name"]   = _name(pdf_file)
+@st.cache_data(show_spinner=False)
+def discover_all_files(base_dir: str) -> dict:
+    root = Path(base_dir)
+    found_docx  = rglob_many(root, DOC_EXTS)
+    found_tab   = rglob_many(root, TABULAR_EXTS)
+    found_pdf   = rglob_many(root, PDF_EXTS)
+    return {
+        "docx": sorted(found_docx),
+        "tabular": sorted(found_tab),
+        "pdf": sorted(found_pdf),
+    }
 
-    st.session_state.setdefault("excel_status", "ยังไม่ได้โหลด")
-    st.session_state.setdefault("word_status",  "ยังไม่ได้โหลด")
-    st.session_state.setdefault("pdf_status",   "ยังไม่ได้โหลด")
+FOUND = discover_all_files(str(BASE_DIR))
 
+# =========================
+# BUILD REFERENCE CORPUS + SIDEBAR STATUS
+# =========================
+@st.cache_data(show_spinner=False)
+def build_reference_corpus_from_all_files(
+    docx_files: list[Path],
+    tabular_files: list[Path],
+    pdf_files: list[Path],
+    total_max_chars: int = 90_000,
+    per_docx_max_chars: int = 16_000,
+    per_pdf_max_chars: int = 8_000,
+    per_tabular_rows: int = 160,
+    per_tabular_cols: int = 12,
+) -> tuple[str, dict]:
+    """
+    อ่านทุกไฟล์ตามชนิด แล้วรวมข้อความเป็นคอร์ปัสสำหรับโมเดล
+    คืนค่า: (corpus_text, status_dict)
+    """
     parts = []
+    status = {"docx": [], "pdf": [], "tabular": []}
+    total_chars = 0
 
-    # Excel
-    if isinstance(excel_file, Path) and excel_file.exists():
+    # DOCX
+    for p in docx_files:
         try:
-            st.session_state["excel_status"] = "กำลังโหลด..."
-            txt = load_excel_as_text(str(excel_file))
-            if txt:
-                parts.append("ข้อมูลจากไฟล์ Excel (CSV):\n" + txt)
-            st.session_state["excel_status"] = "โหลดสำเร็จ"
+            txt = extract_text_from_docx(str(p))[:per_docx_max_chars]
+            if txt.strip():
+                frag = f"[DOCX] {p.name}\n" + txt
+                if total_chars + len(frag) <= total_max_chars:
+                    parts.append(frag)
+                    total_chars += len(frag)
+                status["docx"].append((p.name, "โหลดสำเร็จ"))
+            else:
+                status["docx"].append((p.name, "ไฟล์ว่างหรืออ่านไม่ได้"))
         except Exception as e:
-            st.session_state["excel_status"] = f"ผิดพลาด: {e}"
-    else:
-        st.session_state["excel_status"] = "ไม่พบไฟล์"
+            status["docx"].append((p.name, f"ผิดพลาด: {e}"))
 
-    # Word
-    if isinstance(word_file, Path) and word_file.exists():
+    # TABULAR (CSV/XLSX/XLS)
+    for p in tabular_files:
         try:
-            st.session_state["word_status"] = "กำลังโหลด..."
-            txt = extract_text_from_docx(str(word_file))
-            if txt:
-                parts.append("ข้อมูลจากไฟล์ Word:\n" + txt)
-            st.session_state["word_status"] = "โหลดสำเร็จ"
+            if p.suffix.lower() == ".csv":
+                txt = load_csv_as_text(str(p), max_rows=per_tabular_rows, max_cols=per_tabular_cols)
+            else:
+                txt = load_excel_as_text(str(p), max_rows=per_tabular_rows, max_cols=per_tabular_cols)
+            if txt.strip():
+                frag = f"[TABLE] {p.name}\n" + txt
+                if total_chars + len(frag) <= total_max_chars:
+                    parts.append(frag)
+                    total_chars += len(frag)
+                status["tabular"].append((p.name, "โหลดสำเร็จ"))
+            else:
+                status["tabular"].append((p.name, "ไฟล์ว่างหรืออ่านไม่ได้"))
         except Exception as e:
-            st.session_state["word_status"] = f"ผิดพลาด: {e}"
-    else:
-        st.session_state["word_status"] = "ไม่พบไฟล์"
+            status["tabular"].append((p.name, f"ผิดพลาด: {e}"))
 
     # PDF
-    if isinstance(pdf_file, Path) and pdf_file.exists():
+    for p in pdf_files:
         try:
-            st.session_state["pdf_status"] = "กำลังโหลด..."
-            txt = extract_text_from_pdf(str(pdf_file))
-            if txt:
-                parts.append("ข้อมูลจากไฟล์ PDF:\n" + txt)
-            st.session_state["pdf_status"] = "โหลดสำเร็จ"
+            txt = extract_text_from_pdf(str(p))[:per_pdf_max_chars]
+            if txt.strip():
+                frag = f"[PDF] {p.name}\n" + txt
+                if total_chars + len(frag) <= total_max_chars:
+                    parts.append(frag)
+                    total_chars += len(frag)
+                status["pdf"].append((p.name, "โหลดสำเร็จ"))
+            else:
+                status["pdf"].append((p.name, "ไฟล์ว่างหรืออ่านไม่ได้"))
         except Exception as e:
-            st.session_state["pdf_status"] = f"ผิดพลาด: {e}"
-    else:
-        st.session_state["pdf_status"] = "ไม่พบไฟล์"
+            status["pdf"].append((p.name, f"ผิดพลาด: {e}"))
 
-    blob = "\n\n".join(parts).strip()
-    if len(blob) > max_chars:
-        blob = blob[:max_chars] + "\n\n[TRUNCATED]"
-    return blob
+    corpus = "\n\n".join(parts)
+    if len(corpus) > total_max_chars:
+        corpus = corpus[:total_max_chars] + "\n\n[TRUNCATED]"
+    return corpus, status
 
-# โหลดคอร์ปัส (ก่อน Render Sidebar)
-REFERENCE_BLOB = build_reference_corpus_with_sidebar_status()
+REFERENCE_BLOB, LOAD_STATUS = build_reference_corpus_from_all_files(
+    FOUND["docx"], FOUND["tabular"], FOUND["pdf"]
+)
 
 # =========================
-# Session State (messages)
+# SESSION STATE (MESSAGES)
 # =========================
 if "messages" not in st.session_state:
     st.session_state["messages"] = [
@@ -214,25 +247,36 @@ if "previous_messages" not in st.session_state:
     st.session_state["previous_messages"] = []
 
 # =========================
-# Sidebar (Clear/Restore + สถานะไฟล์)
+# SIDEBAR (CLEAR/RESTORE + สถานะไฟล์)
 # =========================
 with st.sidebar:
     st.header("การจัดการแชท")
-    if st.button("Clear History"):
+    col1, col2 = st.columns(2)
+    if col1.button("Clear History"):
         clear_history()
-    if st.button("Restore Last History"):
+    if col2.button("Restore"):
         restore_history()
 
     st.markdown("---")
-    st.header("สถานะการโหลดไฟล์ข้อมูล")
-    st.info(f"Excel ({st.session_state.get('excel_file_name', 'N/A')}): {st.session_state.get('excel_status', 'ยังไม่ได้โหลด')}")
-    st.info(f"Word ({st.session_state.get('word_file_name', 'N/A')}): {st.session_state.get('word_status', 'ยังไม่ได้โหลด')}")
-    st.info(f"PDF ({st.session_state.get('pdf_file_name', 'N/A')}): {st.session_state.get('pdf_status', 'ยังไม่ได้โหลด')}")
+    st.header("ไฟล์ที่พบในโปรเจ็กต์")
+    st.write(f"- DOCX: {len(FOUND['docx'])} ไฟล์")
+    st.write(f"- ตาราง (CSV/XLSX/XLS): {len(FOUND['tabular'])} ไฟล์")
+    st.write(f"- PDF: {len(FOUND['pdf'])} ไฟล์")
+
+    with st.expander("สถานะการโหลด DOCX"):
+        for name, s in LOAD_STATUS["docx"]:
+            st.info(f"{name} : {s}")
+    with st.expander("สถานะการโหลดตาราง (CSV/XLSX/XLS)"):
+        for name, s in LOAD_STATUS["tabular"]:
+            st.info(f"{name} : {s}")
+    with st.expander("สถานะการโหลด PDF"):
+        for name, s in LOAD_STATUS["pdf"]:
+            st.info(f"{name} : {s}")
 
 # =========================
-# Render History
+# RENDER HISTORY
 # =========================
-assistant_avatar = str(AVATAR_PATH) if AVATAR_PATH else None
+assistant_avatar = str(AVATAR_PATH) if AVATAR_PATH.exists() else None
 
 for msg in st.session_state["messages"]:
     if msg["role"] == "assistant":
@@ -241,11 +285,12 @@ for msg in st.session_state["messages"]:
         st.chat_message(msg["role"]).write(msg["content"])
 
 # =========================
-# Build history for Gemini
+# BUILD HISTORY FOR GEMINI
 # =========================
 def build_history_for_gemini(messages):
     history = []
     if REFERENCE_BLOB:
+        # ไม่แสดงเนื้อหาไฟล์ให้ผู้ใช้เห็นโดยตรง แต่ส่งเป็นบริบทให้โมเดล
         history.append({"role": "user", "parts": [{"text": "ข้อมูลอ้างอิง:\n" + REFERENCE_BLOB}]})
     for m in messages:
         role = "user" if m["role"] == "user" else "model"
@@ -253,11 +298,11 @@ def build_history_for_gemini(messages):
     return history
 
 # =========================
-# Typing-effect streaming
+# TYPING-EFFECT STREAMING
 # =========================
 def stream_typing_response(chat_session, prompt_text: str, typing_delay: float = 0.004) -> str:
-    status = st.empty()      # แสดงสถานะชั่วคราว
-    placeholder = st.empty() # ที่ใส่ข้อความพิมพ์ไหล ๆ
+    status = st.empty()
+    placeholder = st.empty()
     status.write("กำลังค้นหาคำตอบ...")
 
     full_text = ""
@@ -279,7 +324,7 @@ def stream_typing_response(chat_session, prompt_text: str, typing_delay: float =
     return full_text
 
 # =========================
-# Chat input & response
+# CHAT INPUT & RESPONSE
 # =========================
 prompt = st.chat_input("พิมพ์คำถามของคุณที่นี่...")
 if prompt:
