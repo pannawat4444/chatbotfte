@@ -35,7 +35,7 @@ PAGE_ICON = str(AVATAR_PATH) if AVATAR_PATH.exists() else None
 # PAGE CONFIG & HEADER
 # =========================
 st.set_page_config(page_title="FTE Chatbot • KMUTNB", page_icon=PAGE_ICON, layout="centered")
-st.title("FTE Chatbot • KMUTNB")
+st.title("🗨️ FTE Chatbot • KMUTNB")
 
 # =========================
 # API KEY & MODEL CONFIG
@@ -269,9 +269,9 @@ if "previous_messages" not in st.session_state:
 with st.sidebar:
     st.header("การจัดการแชท")
     col1, col2 = st.columns(2)
-    if col1.button("Clear History"):
+    if col1.button("🧹 Clear History"):
         clear_history()
-    if col2.button("Restore"):
+    if col2.button("🔁 Restore"):
         restore_history()
 
     st.markdown("---")
