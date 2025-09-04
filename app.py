@@ -58,14 +58,16 @@ SAFETY_SETTINGS = {
     HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
 }
-MODEL_NAME = "gemini-2.0-flash"
+PRIMARY_MODEL_NAME = "gemini-2.0-flash"
+FALLBACK_MODEL_NAME = "gemini-1.5-flash"  # สำรองเมื่อโดน 429/เกินโควตา
 
-model = genai.GenerativeModel(
-    model_name=MODEL_NAME,
-    safety_settings=SAFETY_SETTINGS,
-    generation_config=generation_config,
-    system_instruction=PROMPT_FTE,
-)
+def make_model(name: str) -> genai.GenerativeModel:
+    return genai.GenerativeModel(
+        model_name=name,
+        safety_settings=SAFETY_SETTINGS,
+        generation_config=generation_config,
+        system_instruction=PROMPT_FTE,
+    )
 
 # =========================
 # CHAT HISTORY UTILS
@@ -149,11 +151,7 @@ def discover_all_files(base_dir: str) -> dict:
     found_docx  = rglob_many(root, DOC_EXTS)
     found_tab   = rglob_many(root, TABULAR_EXTS)
     found_pdf   = rglob_many(root, PDF_EXTS)
-    return {
-        "docx": sorted(found_docx),
-        "tabular": sorted(found_tab),
-        "pdf": sorted(found_pdf),
-    }
+    return {"docx": sorted(found_docx), "tabular": sorted(found_tab), "pdf": sorted(found_pdf)}
 
 FOUND = discover_all_files(str(BASE_DIR))
 
@@ -171,10 +169,7 @@ def build_reference_corpus_from_all_files(
     per_tabular_rows: int = 160,
     per_tabular_cols: int = 12,
 ) -> tuple[str, dict]:
-    """
-    อ่านทุกไฟล์ตามชนิด แล้วรวมข้อความเป็นคอร์ปัสสำหรับโมเดล
-    คืนค่า: (corpus_text, status_dict)
-    """
+    """อ่านทุกไฟล์ตามชนิด รวมเป็นคอร์ปัส (จำกัดขนาด) + รายงานสถานะ"""
     parts = []
     status = {"docx": [], "pdf": [], "tabular": []}
     total_chars = 0
@@ -298,17 +293,29 @@ def build_history_for_gemini(messages):
     return history
 
 # =========================
-# TYPING-EFFECT STREAMING
+# STREAMING + RETRY + FALLBACK (HANDLE 429)
 # =========================
-def stream_typing_response(chat_session, prompt_text: str, typing_delay: float = 0.004) -> str:
+def _should_retry(e: Exception) -> bool:
+    msg = str(e).lower()
+    keys = ["429", "quota", "rate", "exceed", "resource exhausted", "deadline exceeded"]
+    return any(k in msg for k in keys)
+
+def stream_typing_with_retry(history_payload, prompt_text: str,
+                             typing_delay: float = 0.004,
+                             retries: int = 2,
+                             backoff: float = 2.0) -> str:
+    """
+    สตรีมคำตอบจากโมเดลหลักด้วย retry/backoff; ถ้ายังไม่ผ่าน สลับไปใช้โมเดลสำรองอัตโนมัติ
+    """
     status = st.empty()
     placeholder = st.empty()
     status.write("กำลังค้นหาคำตอบ...")
 
-    full_text = ""
-    first_char_written = False
-    try:
-        for chunk in chat_session.send_message(prompt_text, stream=True):
+    def _stream_from_model(model_name: str) -> str:
+        nonlocal status, placeholder
+        session = make_model(model_name).start_chat(history=history_payload)
+        full_text, first_char_written = "", False
+        for chunk in session.send_message(prompt_text, stream=True):
             text = getattr(chunk, "text", "") or ""
             for ch in text:
                 if not first_char_written:
@@ -317,11 +324,32 @@ def stream_typing_response(chat_session, prompt_text: str, typing_delay: float =
                 full_text += ch
                 placeholder.markdown(full_text)
                 time.sleep(typing_delay)
+        return full_text
+
+    # ---- Try primary with retries
+    last_err = None
+    for attempt in range(retries):
+        try:
+            return _stream_from_model(PRIMARY_MODEL_NAME)
+        except Exception as e:
+            last_err = e
+            if _should_retry(e) and attempt < retries - 1:
+                time.sleep(backoff)
+                backoff *= 2
+            else:
+                break
+
+    # ---- Fallback
+    try:
+        placeholder.markdown("**สลับไปใช้โมเดลสำรองชั่วคราวเพื่อให้ได้คำตอบค่ะ...**")
+        return _stream_from_model(FALLBACK_MODEL_NAME)
+    except Exception as e2:
         status.empty()
-    except Exception as e:
-        status.empty()
-        placeholder.markdown(f"เกิดข้อผิดพลาดระหว่างสตรีมคำตอบ: {e}")
-    return full_text
+        placeholder.markdown(
+            "ขออภัยค่ะ ระบบไม่สามารถสร้างคำตอบได้ในขณะนี้ (อาจเกิดจากโควตาหรือการเชื่อมต่อ)\n"
+            "กรุณาลองใหม่ภายหลัง หรือปรับลดความยาวคำถาม/ความถี่การใช้งานค่ะ"
+        )
+        return ""
 
 # =========================
 # CHAT INPUT & RESPONSE
@@ -332,9 +360,8 @@ if prompt:
     st.session_state["messages"].append({"role": "user", "content": prompt})
     st.chat_message("user").write(prompt)
 
-    # ประวัติ + เริ่มแชทกับโมเดล
+    # ประวัติ + เริ่มแชท
     history_payload = build_history_for_gemini(st.session_state["messages"][:-1])
-    chat_session = model.start_chat(history=history_payload)
 
     # ผู้ช่วย
     with st.chat_message("assistant", avatar=assistant_avatar):
@@ -344,19 +371,12 @@ if prompt:
             history_text = "\n".join(
                 [f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state["messages"]]
             )
-            tmp_session = genai.GenerativeModel(
-                model_name=MODEL_NAME,
-                safety_settings=SAFETY_SETTINGS,
-                generation_config=generation_config,
-                system_instruction=PROMPT_FTE,
-            ).start_chat(history=[])
-            reply = stream_typing_response(
-                chat_session=tmp_session,
-                prompt_text=f"สรุปประวัติการสนทนานี้ให้อ่านง่าย กระชับ และเป็นกันเอง:\n\n{history_text}",
-                typing_delay=0.003
-            )
+            # ใช้ fallback-aware เช่นกัน (สรุปประวัติ)
+            reply = stream_typing_with_retry(history_payload=[],
+                                             prompt_text=f"สรุปประวัติการสนทนานี้ให้อ่านง่าย กระชับ และเป็นกันเอง:\n\n{history_text}",
+                                             typing_delay=0.003)
         else:
-            reply = stream_typing_response(chat_session, prompt_text=prompt, typing_delay=0.004)
+            reply = stream_typing_with_retry(history_payload, prompt_text=prompt, typing_delay=0.004)
 
     # ปิดท้ายทุกคำตอบด้วยประโยคสุภาพแบบสุ่ม (ไม่มีอีโมจิ)
     followups = [
@@ -366,7 +386,7 @@ if prompt:
         "\n\nมีหัวข้ออื่นของคณะครุศาสตร์อุตสาหกรรมที่อยากทราบอีกไหมคะ",
         "\n\nหากต้องการข้อมูลเชิงลึก ระบุรหัสวิชา/ชื่อหลักสูตรเพิ่มเติมได้เลยนะคะ",
     ]
-    reply_with_followup = reply + random.choice(followups)
+    reply_with_followup = (reply or "") + random.choice(followups)
 
     # เก็บลงประวัติ
     st.session_state["messages"].append({"role": "assistant", "content": reply_with_followup})
