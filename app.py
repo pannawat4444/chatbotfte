@@ -1,10 +1,12 @@
 # app.py
 import os
 import time
+import random
 import pandas as pd
 import streamlit as st
 import docx
 from PyPDF2 import PdfReader
+from pathlib import Path
 
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
@@ -12,16 +14,41 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from prompt import PROMPT_FTE  # ต้องมีไฟล์ prompt.py ที่ประกาศ PROMPT_FTE
 
 # =========================
-# 🔧 หน้าแรก & ตั้งค่าทั่วไป + Avatar
+# PATHS (GitHub/Streamlit Cloud friendly)
 # =========================
-AVATAR_PATH = "assets/green-bot.png"   # <<-- วางไฟล์ไอคอนบอทสีเขียวที่นี่
-PAGE_ICON = AVATAR_PATH if os.path.exists(AVATAR_PATH) else "🟢"
+BASE_DIR = Path(__file__).resolve().parent
 
+# ไฟล์อยู่ที่รากรีโป (ตามภาพ GitHub ที่ให้มา)
+EXCEL_CANDIDATES = [
+    BASE_DIR / "FTE-DATASET.xlsx",
+    BASE_DIR / "workaw_data.xlsx",   # เผื่อใช้ไฟล์นี้ด้วย
+]
+DOCX_CANDIDATES  = [BASE_DIR / "Data Set No Question docx.docx"]
+PDF_CANDIDATES   = [BASE_DIR / "Data Set No Question pdf.pdf"]
+
+AVATAR_CANDIDATES = [BASE_DIR / "assets" / "green-bot.png"]  # ถ้าไม่มีจะไม่ใช้
+
+def pick_first_existing(paths):
+    for p in paths:
+        if p.exists():
+            return p
+    return None
+
+EXCEL_PATH  = pick_first_existing(EXCEL_CANDIDATES)
+DOCX_PATH   = pick_first_existing(DOCX_CANDIDATES)
+PDF_PATH    = pick_first_existing(PDF_CANDIDATES)
+AVATAR_PATH = pick_first_existing(AVATAR_CANDIDATES)
+
+PAGE_ICON = str(AVATAR_PATH) if AVATAR_PATH else None
+
+# =========================
+# Page config & Header
+# =========================
 st.set_page_config(page_title="FTE Chatbot • KMUTNB", page_icon=PAGE_ICON, layout="centered")
 st.title("💬 Welcome to Faculty of Technical Education, KMUTNB")
 
 # =========================
-# 🔐 API KEY & Model config
+# API Key & Model config
 # =========================
 api_key = st.secrets.get("GEMINI_APIKEY")
 if not api_key:
@@ -53,112 +80,170 @@ model = genai.GenerativeModel(
 )
 
 # =========================
-# 📁 Utilities: Load files (cached)
+# Chat history utils
+# =========================
+def clear_history():
+    st.session_state["previous_messages"] = st.session_state.get("messages", []).copy()
+    st.session_state["messages"] = [{"role": "assistant", "content": "ประวัติการเเชทของท่าน"}]
+    st.rerun()
+
+def restore_history():
+    if st.session_state.get("previous_messages"):
+        st.session_state["messages"] = st.session_state["previous_messages"].copy()
+    else:
+        st.warning("ไม่พบประวัติที่สามารถเรียกคืนได้")
+    st.rerun()
+
+# =========================
+# File readers (path-based) + cache
 # =========================
 @st.cache_data(show_spinner=False)
 def extract_text_from_docx(docx_path: str) -> str:
     try:
         d = docx.Document(docx_path)
-        return "\n".join([p.text for p in d.paragraphs if p.text.strip()])
+        return "\n".join([p.text for p in d.paragraphs])
     except Exception as e:
-        return f"[WARN] อ่านไฟล์ Word ไม่สำเร็จ: {e}"
+        st.error(f"Error reading Word file '{docx_path}': {e}")
+        return ""
 
 @st.cache_data(show_spinner=False)
 def extract_text_from_pdf(pdf_path: str) -> str:
     try:
         reader = PdfReader(pdf_path)
-        parts = []
+        text = ""
         for page in reader.pages:
-            t = page.extract_text() or ""
-            if t.strip():
-                parts.append(t)
-        return "\n".join(parts)
+            text += page.extract_text() or ""
+        return text
     except Exception as e:
-        return f"[WARN] อ่านไฟล์ PDF ไม่สำเร็จ: {e}"
+        st.error(f"Error reading PDF file '{pdf_path}': {e}")
+        return ""
 
 @st.cache_data(show_spinner=False)
 def load_excel_as_text(excel_path: str, max_rows: int = 80) -> str:
     try:
+        if not os.path.exists(excel_path):
+            return ""
         df = pd.read_excel(excel_path)
-        # จำกัดคอลัมน์/แถวเพื่อลด payload
+        # ลด payload
         if df.shape[1] > 8:
             df = df.iloc[:, :8]
         if len(df) > max_rows:
             df = df.head(max_rows)
         return df.to_csv(index=False)
     except Exception as e:
-        return f"[WARN] อ่านไฟล์ Excel ไม่สำเร็จ: {e}"
+        st.error(f"Error reading Excel file '{excel_path}': {e}")
+        return ""
 
-@st.cache_data(show_spinner=False)
-def build_reference_corpus(
-    excel_file="FTE-DATASET.xlsx",
-    word_file="Data Set chatbotfte.docx",
-    pdf_file="Data Set chatbotfte.pdf",
-    max_chars=45_000,
+# =========================
+# Build reference corpus + Sidebar status
+# =========================
+def build_reference_corpus_with_sidebar_status(
+    excel_file: Path | None = EXCEL_PATH,
+    word_file: Path | None = DOCX_PATH,
+    pdf_file:  Path | None = PDF_PATH,
+    max_chars: int = 45_000,
 ) -> str:
+    def _name(p: Path | None) -> str:
+        return p.name if isinstance(p, Path) else "N/A"
+
+    st.session_state["excel_file_name"] = _name(excel_file)
+    st.session_state["word_file_name"]  = _name(word_file)
+    st.session_state["pdf_file_name"]   = _name(pdf_file)
+
+    st.session_state.setdefault("excel_status", "ยังไม่ได้โหลด")
+    st.session_state.setdefault("word_status",  "ยังไม่ได้โหลด")
+    st.session_state.setdefault("pdf_status",   "ยังไม่ได้โหลด")
+
     parts = []
-    if os.path.exists(excel_file):
-        parts.append("ข้อมูลจากไฟล์ Excel (CSV):\n" + load_excel_as_text(excel_file))
-    if os.path.exists(word_file):
-        parts.append("ข้อมูลจากไฟล์ Word:\n" + extract_text_from_docx(word_file))
-    if os.path.exists(pdf_file):
-        parts.append("ข้อมูลจากไฟล์ PDF:\n" + extract_text_from_pdf(pdf_file))
+
+    # Excel
+    if isinstance(excel_file, Path) and excel_file.exists():
+        try:
+            st.session_state["excel_status"] = "กำลังโหลด..."
+            txt = load_excel_as_text(str(excel_file))
+            if txt:
+                parts.append("ข้อมูลจากไฟล์ Excel (CSV):\n" + txt)
+            st.session_state["excel_status"] = "โหลดสำเร็จ"
+        except Exception as e:
+            st.session_state["excel_status"] = f"ผิดพลาด: {e}"
+    else:
+        st.session_state["excel_status"] = "ไม่พบไฟล์"
+
+    # Word
+    if isinstance(word_file, Path) and word_file.exists():
+        try:
+            st.session_state["word_status"] = "กำลังโหลด..."
+            txt = extract_text_from_docx(str(word_file))
+            if txt:
+                parts.append("ข้อมูลจากไฟล์ Word:\n" + txt)
+            st.session_state["word_status"] = "โหลดสำเร็จ"
+        except Exception as e:
+            st.session_state["word_status"] = f"ผิดพลาด: {e}"
+    else:
+        st.session_state["word_status"] = "ไม่พบไฟล์"
+
+    # PDF
+    if isinstance(pdf_file, Path) and pdf_file.exists():
+        try:
+            st.session_state["pdf_status"] = "กำลังโหลด..."
+            txt = extract_text_from_pdf(str(pdf_file))
+            if txt:
+                parts.append("ข้อมูลจากไฟล์ PDF:\n" + txt)
+            st.session_state["pdf_status"] = "โหลดสำเร็จ"
+        except Exception as e:
+            st.session_state["pdf_status"] = f"ผิดพลาด: {e}"
+    else:
+        st.session_state["pdf_status"] = "ไม่พบไฟล์"
 
     blob = "\n\n".join(parts).strip()
     if len(blob) > max_chars:
         blob = blob[:max_chars] + "\n\n[TRUNCATED]"
     return blob
 
-REFERENCE_BLOB = build_reference_corpus()
+# โหลดคอร์ปัส (ก่อน Render Sidebar)
+REFERENCE_BLOB = build_reference_corpus_with_sidebar_status()
 
 # =========================
-# 🧠 Session State
+# Session State (messages)
 # =========================
 if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "ท่านสนใจสอบถามข้อมูลเกี่ยวกับคณะครุศาสตร์อุตสาหกรรม มจพ. ด้านใดคะ"}
+    st.session_state["messages"] = [
+        {"role": "assistant", "content": "คุณต้องการสอบถามข้อมูลของคณะครุศาสตร์อุตสาหกรรมเรื่องใดคะ"}
     ]
 if "previous_messages" not in st.session_state:
-    st.session_state.previous_messages = []
+    st.session_state["previous_messages"] = []
 
 # =========================
-# 🧹 Sidebar (ไม่มีสถานะไฟล์อ้างอิง)
+# Sidebar (Clear/Restore + สถานะไฟล์)
 # =========================
 with st.sidebar:
     st.header("การจัดการแชท")
-    col1, col2 = st.columns(2)
-    if col1.button("🧹 Clear"):
-        st.session_state.previous_messages = st.session_state.messages.copy()
-        st.session_state.messages = [{"role": "assistant", "content": "ประวัติการเเชทของท่าน"}]
-        st.toast("เคลียร์ประวัติแล้ว", icon="🧹")
-        st.rerun()
-    if col2.button("🔄 Restore"):
-        if st.session_state.previous_messages:
-            st.session_state.messages = st.session_state.previous_messages.copy()
-            st.toast("เรียกคืนประวัติล่าสุดแล้ว", icon="🔄")
-        else:
-            st.warning("ไม่พบประวัติที่สามารถเรียกคืนได้")
+    if st.button("Clear History"):
+        clear_history()
+    if st.button("Restore Last History"):
+        restore_history()
+
+    st.markdown("---")
+    st.header("สถานะการโหลดไฟล์ข้อมูล")
+    st.info(f"Excel ({st.session_state.get('excel_file_name', 'N/A')}): {st.session_state.get('excel_status', 'ยังไม่ได้โหลด')}")
+    st.info(f"Word ({st.session_state.get('word_file_name', 'N/A')}): {st.session_state.get('word_status', 'ยังไม่ได้โหลด')}")
+    st.info(f"PDF ({st.session_state.get('pdf_file_name', 'N/A')}): {st.session_state.get('pdf_status', 'ยังไม่ได้โหลด')}")
 
 # =========================
-# 🗣️ Render History (assistant avatar = green bot icon if available)
+# Render History
 # =========================
-assistant_avatar = AVATAR_PATH if os.path.exists(AVATAR_PATH) else "🟢"
+assistant_avatar = str(AVATAR_PATH) if AVATAR_PATH else None
 
-for msg in st.session_state.messages:
+for msg in st.session_state["messages"]:
     if msg["role"] == "assistant":
         st.chat_message("assistant", avatar=assistant_avatar).write(msg["content"])
     else:
         st.chat_message(msg["role"]).write(msg["content"])
 
 # =========================
-# 🧩 History builder for Gemini
+# Build history for Gemini
 # =========================
 def build_history_for_gemini(messages):
-    """
-    แปลงประวัติแชทเป็นรูปแบบที่ Gemini เข้าใจ
-    - ดันคอร์ปัสอ้างอิงเข้าไปเป็น context แรก (ฝั่ง user)
-    - ตามด้วยบทสนทนาก่อนหน้า
-    """
     history = []
     if REFERENCE_BLOB:
         history.append({"role": "user", "parts": [{"text": "ข้อมูลอ้างอิง:\n" + REFERENCE_BLOB}]})
@@ -168,18 +253,12 @@ def build_history_for_gemini(messages):
     return history
 
 # =========================
-# 🚀 Typing-effect streaming
+# Typing-effect streaming
 # =========================
 def stream_typing_response(chat_session, prompt_text: str, typing_delay: float = 0.004) -> str:
-    """
-    สตรีมคำตอบจาก Gemini แล้วแสดงแบบ 'กำลังพิมพ์'
-    - ไม่มี dropdown/expander
-    - โชว์ 'กำลังค้นหาคำตอบ…' ระหว่างคิด
-    - พิมพ์ทีละตัวอักษรจนจบ
-    """
-    status = st.empty()         # แสดงสถานะชั่วคราว (ระหว่างเริ่มคิด)
-    placeholder = st.empty()    # กล่องข้อความที่ค่อย ๆ เติมคำตอบ
-    status.write("กำลังค้นหาคำตอบ…")
+    status = st.empty()      # แสดงสถานะชั่วคราว
+    placeholder = st.empty() # ที่ใส่ข้อความพิมพ์ไหล ๆ
+    status.write("กำลังค้นหาคำตอบ...")
 
     full_text = ""
     first_char_written = False
@@ -188,39 +267,38 @@ def stream_typing_response(chat_session, prompt_text: str, typing_delay: float =
             text = getattr(chunk, "text", "") or ""
             for ch in text:
                 if not first_char_written:
-                    status.empty()           # ลบสถานะทันทีเมื่อเริ่มพิมพ์
+                    status.empty()
                     first_char_written = True
                 full_text += ch
-                placeholder.markdown(full_text)  # ใช้ markdown ให้จัดรูปสวย
+                placeholder.markdown(full_text)
                 time.sleep(typing_delay)
         status.empty()
     except Exception as e:
         status.empty()
-        placeholder.markdown(f"> [ขออภัย] เกิดข้อผิดพลาดระหว่างสตรีมคำตอบ: `{e}`")
+        placeholder.markdown(f"เกิดข้อผิดพลาดระหว่างสตรีมคำตอบ: {e}")
     return full_text
 
 # =========================
-# 💬 Chat input & response
+# Chat input & response
 # =========================
 prompt = st.chat_input("พิมพ์คำถามของคุณที่นี่...")
 if prompt:
-    # ฝั่งผู้ใช้
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    # ผู้ใช้
+    st.session_state["messages"].append({"role": "user", "content": prompt})
     st.chat_message("user").write(prompt)
 
-    # เตรียมประวัติ + สร้าง chat session
-    history_payload = build_history_for_gemini(st.session_state.messages[:-1])  # ไม่รวม prompt ล่าสุดซ้ำ
+    # ประวัติ + เริ่มแชทกับโมเดล
+    history_payload = build_history_for_gemini(st.session_state["messages"][:-1])
     chat_session = model.start_chat(history=history_payload)
 
-    # ฝั่งผู้ช่วย — ใช้ไอคอนบอทสีเขียวถ้ามี
+    # ผู้ช่วย
     with st.chat_message("assistant", avatar=assistant_avatar):
         normalized = prompt.strip().lower()
 
         if normalized == "history":
             history_text = "\n".join(
-                [f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state.messages]
+                [f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state["messages"]]
             )
-            # ใช้โมเดลสรุปข้อความให้สวย แล้วแสดงด้วย typing effect
             tmp_session = genai.GenerativeModel(
                 model_name=MODEL_NAME,
                 safety_settings=SAFETY_SETTINGS,
@@ -232,20 +310,18 @@ if prompt:
                 prompt_text=f"สรุปประวัติการสนทนานี้ให้อ่านง่าย กระชับ และเป็นกันเอง:\n\n{history_text}",
                 typing_delay=0.003
             )
-
-        elif normalized.startswith("add") or normalized.endswith("add"):
-            # ตอบสั้น ๆ ด้วย typing effect เช่นกัน
-            text = "ขอบคุณสำหรับคำแนะนำค่ะ"
-            ph = st.empty()
-            reply = ""
-            for ch in text:
-                reply += ch
-                ph.markdown(reply)
-                time.sleep(0.004)
-
         else:
-            # ตอบหลัก: stream + typing effect
             reply = stream_typing_response(chat_session, prompt_text=prompt, typing_delay=0.004)
 
-    # เก็บลงประวัติ (assistant)
-    st.session_state.messages.append({"role": "assistant", "content": reply})
+    # ปิดท้ายทุกคำตอบด้วยประโยคสุภาพแบบสุ่ม (ไม่มีอีโมจิ)
+    followups = [
+        "\n\nมีอะไรเพิ่มเติมที่ต้องการให้ฉันช่วยอีกไหมคะ",
+        "\n\nต้องการข้อมูลส่วนไหนเพิ่มเติมอีกไหมคะ",
+        "\n\nอยากให้ช่วยตรวจสอบรายละเอียดอื่นเพิ่มเติมไหมคะ",
+        "\n\nมีหัวข้ออื่นของคณะครุศาสตร์อุตสาหกรรมที่อยากทราบอีกไหมคะ",
+        "\n\nหากต้องการข้อมูลเชิงลึก ระบุรหัสวิชา/ชื่อหลักสูตรเพิ่มเติมได้เลยนะคะ",
+    ]
+    reply_with_followup = reply + random.choice(followups)
+
+    # เก็บลงประวัติ
+    st.session_state["messages"].append({"role": "assistant", "content": reply_with_followup})
