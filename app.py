@@ -267,7 +267,7 @@ for p in FOUND["pdf"]:
 # =========================
 if "messages" not in st.session_state:
     st.session_state["messages"] = [
-        {"role": "assistant", "content": "คุณต้องการสอบถามข้อมูลของคณะครุศาสตร์อุตสาหกรรมเรื่องใดคะ"}
+        {"role": "assistant", "content": "คุณต้องการสอบถามข้อมูลเรื่องใดคะ"}
     ]
 if "previous_messages" not in st.session_state:
     st.session_state["previous_messages"] = []
