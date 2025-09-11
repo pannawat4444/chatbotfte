@@ -4,7 +4,6 @@ import time
 import random
 from pathlib import Path
 from typing import Iterable, List, Dict, Tuple
-
 import pandas as pd
 import streamlit as st
 import docx
@@ -143,9 +142,11 @@ def load_csv_as_text(csv_path: str, max_rows: int = 200, max_cols: int = 12) -> 
 # =========================
 # DISCOVER FILES (RECURSIVE)
 # =========================
+# แก้ไขโค้ดที่นี่
 def rglob_many(root: Path, exts: Iterable[str]) -> list[Path]:
     exts_low = {e.lower() for e in exts}
-    return [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in exts_low]
+    # เพิ่มเงื่อนไข .name.startswith("~$") เพื่อละเว้นไฟล์ชั่วคราว
+    return [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in exts_low and not p.name.startswith("~$")]
 
 @st.cache_data(show_spinner=False)
 def discover_all_files(base_dir: str) -> dict:
@@ -153,6 +154,11 @@ def discover_all_files(base_dir: str) -> dict:
     found_docx  = rglob_many(root, DOC_EXTS)
     found_tab   = rglob_many(root, TABULAR_EXTS)
     found_pdf   = rglob_many(root, PDF_EXTS)
+
+    # เพิ่มการค้นหาไฟล์ "dataset newver.docx" โดยตรง
+    dataset_file = root / "workaw" / "dataset newver.docx"
+    if dataset_file.exists():
+        found_docx.append(dataset_file)
     return {"docx": sorted(found_docx), "tabular": sorted(found_tab), "pdf": sorted(found_pdf)}
 
 FOUND = discover_all_files(str(BASE_DIR))
@@ -179,8 +185,9 @@ def collect_chunks(docx_files: List[Path], tabular_files: List[Path], pdf_files:
     for p in docx_files:
         try:
             txt = extract_text_from_docx(str(p))
-            for c in chunk_text(txt):
-                rows.append({"source": p.name, "kind": "DOCX", "text": c})
+            if txt:  # เพิ่มเงื่อนไขเพื่อตรวจสอบว่ามีข้อความหรือไม่
+                for c in chunk_text(txt):
+                    rows.append({"source": p.name, "kind": "DOCX", "text": c})
         except Exception:
             pass
 
@@ -191,8 +198,9 @@ def collect_chunks(docx_files: List[Path], tabular_files: List[Path], pdf_files:
                 txt = load_csv_as_text(str(p))
             else:
                 txt = load_excel_as_text(str(p))
-            for c in chunk_text(txt):
-                rows.append({"source": p.name, "kind": "TABLE", "text": c})
+            if txt:
+                for c in chunk_text(txt):
+                    rows.append({"source": p.name, "kind": "TABLE", "text": c})
         except Exception:
             pass
 
@@ -200,8 +208,9 @@ def collect_chunks(docx_files: List[Path], tabular_files: List[Path], pdf_files:
     for p in pdf_files:
         try:
             txt = extract_text_from_pdf(str(p))
-            for c in chunk_text(txt):
-                rows.append({"source": p.name, "kind": "PDF", "text": c})
+            if txt:
+                for c in chunk_text(txt):
+                    rows.append({"source": p.name, "kind": "PDF", "text": c})
         except Exception:
             pass
 
@@ -380,10 +389,10 @@ if prompt:
     with st.chat_message("assistant", avatar=assistant_avatar):
         reply = stream_typing_with_retry(history_payload, prompt_text=prompt, typing_delay=0.004)
 
-     # ปิดท้ายทุกคำตอบด้วยประโยคสุภาพแบบสุ่ม (ไม่มีอีโมจิ)
+    # ปิดท้ายทุกคำตอบด้วยประโยคสุภาพแบบสุ่ม (ไม่มีอีโมจิ)
     followups = [
         "\n\nต้องการข้อมูลส่วนไหนเพิ่มเติมอีกไหมคะ"
     ]
     reply_with_followup = (reply or "") + random.choice(followups)
-        
+    
     st.session_state["messages"].append({"role": "assistant", "content": (reply or "") + random.choice(followups)})
