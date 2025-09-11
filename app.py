@@ -34,7 +34,7 @@ PAGE_ICON = str(AVATAR_PATH) if AVATAR_PATH.exists() else None
 # PAGE CONFIG & HEADER
 # =========================
 st.set_page_config(page_title="FTE Chatbot • KMUTNB", page_icon=PAGE_ICON, layout="centered")
-st.title("🗨️ FTE Chatbot • KMUTNB")
+st.title("🗨️ Computer Education & Civil Engineering and Education Chatbot • KMUTNB")
 
 # =========================
 # API KEY & MODEL CONFIG
