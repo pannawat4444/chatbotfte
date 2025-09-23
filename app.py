@@ -283,21 +283,22 @@ with st.sidebar:
     if col2.button("🔁 Restore"):
         restore_history()
 
-    st.markdown("---")
-    st.header("ไฟล์ที่พบในโปรเจ็กต์")
-    st.write(f"- DOCX: {len(FOUND['docx'])} ไฟล์")
-    st.write(f"- ตาราง (CSV/XLSX/XLS): {len(FOUND['tabular'])} ไฟล์")
-    st.write(f"- PDF: {len(FOUND['pdf'])} ไฟล์")
 
-    with st.expander("สถานะการโหลด DOCX"):
-        for name, s in LOAD_STATUS["docx"].items():
-            st.info(f"{name} : {s}")
-    with st.expander("สถานะการโหลดตาราง (CSV/XLSX/XLS)"):
-        for name, s in LOAD_STATUS["tabular"].items():
-            st.info(f"{name} : {s}")
-    with st.expander("สถานะการโหลด PDF"):
-        for name, s in LOAD_STATUS["pdf"].items():
-            st.info(f"{name} : {s}")
+    st.markdown("---")
+    #st.header("ไฟล์ที่พบในโปรเจ็กต์")
+    #st.write(f"- DOCX: {len(FOUND['docx'])} ไฟล์")
+    #st.write(f"- ตาราง (CSV/XLSX/XLS): {len(FOUND['tabular'])} ไฟล์")
+    #st.write(f"- PDF: {len(FOUND['pdf'])} ไฟล์")
+
+    #with st.expander("สถานะการโหลด DOCX"):
+      #  for name, s in LOAD_STATUS["docx"].items():
+            #st.info(f"{name} : {s}")
+    #with st.expander("สถานะการโหลดตาราง (CSV/XLSX/XLS)"):
+        #for name, s in LOAD_STATUS["tabular"].items():
+           # st.info(f"{name} : {s}")
+   # with st.expander("สถานะการโหลด PDF"):
+        #for name, s in LOAD_STATUS["pdf"].items():
+           # st.info(f"{name} : {s}")
 
 # =========================
 # RENDER HISTORY
