@@ -47,7 +47,7 @@ if not api_key:
 genai.configure(api_key=api_key)
 
 generation_config = {
-    "temperature": 0.1,
+    "temperature": 0.5,
     "top_p": 0.95,
     "top_k": 64,
     "max_output_tokens": 1024,
