@@ -156,7 +156,7 @@ def discover_all_files(base_dir: str) -> dict:
     found_pdf   = rglob_many(root, PDF_EXTS)
 
     # เพิ่มการค้นหาไฟล์ "dataset newver.docx" โดยตรง
-    dataset_file = root / "workaw" / "dataset newver.docx"
+    dataset_file = root / "workaw" / "Data คำตอบ  ครุล่าสุด.docx"
     if dataset_file.exists():
         found_docx.append(dataset_file)
     return {"docx": sorted(found_docx), "tabular": sorted(found_tab), "pdf": sorted(found_pdf)}
