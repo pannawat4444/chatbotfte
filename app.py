@@ -14,7 +14,6 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 from prompt import PROMPT_FTE  # ต้องมีไฟล์ prompt.py ที่ประกาศ PROMPT_FTE
 
-# ====== NEW: retrieval deps (TF-IDF) ======
 from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
 
@@ -59,8 +58,8 @@ SAFETY_SETTINGS = {
     HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
 }
-PRIMARY_MODEL_NAME = "gemini-2.0-flash"
-FALLBACK_MODEL_NAME = "gemini-1.5-flash"
+PRIMARY_MODEL_NAME = "gemini-2.5-flash"
+FALLBACK_MODEL_NAME = "gemini-2.0-flash"
 
 def make_model(name: str) -> genai.GenerativeModel:
     return genai.GenerativeModel(
@@ -137,12 +136,11 @@ def load_csv_as_text(csv_path: str, max_rows: int = 200, max_cols: int = 12) -> 
         return df.to_csv(index=False)
     except Exception as e:
         st.error(f"Error reading CSV file '{csv_path}': {e}")
-        return ""
+        return "" 
 
 # =========================
 # DISCOVER FILES (RECURSIVE)
 # =========================
-# แก้ไขโค้ดที่นี่
 def rglob_many(root: Path, exts: Iterable[str]) -> list[Path]:
     exts_low = {e.lower() for e in exts}
     # เพิ่มเงื่อนไข .name.startswith("~$") เพื่อละเว้นไฟล์ชั่วคราว
@@ -155,7 +153,6 @@ def discover_all_files(base_dir: str) -> dict:
     found_tab   = rglob_many(root, TABULAR_EXTS)
     found_pdf   = rglob_many(root, PDF_EXTS)
 
-    # เพิ่มการค้นหาไฟล์ "dataset newver.docx" โดยตรง
     dataset_file = root / "workaw" / "Data คำตอบ  ครุล่าสุด.docx"
     if dataset_file.exists():
         found_docx.append(dataset_file)
@@ -249,7 +246,6 @@ def retrieve_context(query: str, top_k: int = 8, max_chars: int = 6000) -> Tuple
 # =========================
 # BUILD REFERENCE STATUS (สำหรับ Sidebar เท่านั้น)
 # =========================
-# นับสถานะโหลดแบบคร่าว ๆ จากผล collect_chunks
 LOAD_STATUS = {
     "docx": {},
     "tabular": {},
