@@ -85,7 +85,7 @@ def restore_history():
     st.rerun()
 
 # =========================
-# FILE READERS (CACHED)
+# FILE READERS (CACHED) PDF & Docx
 # =========================
 @st.cache_data(show_spinner=False)
 def extract_text_from_docx(docx_path: str) -> str:
